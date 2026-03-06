@@ -1,77 +1,49 @@
-from web3 import Web3
+import requests
 import pandas as pd
-from tqdm import tqdm
-import time
+from datetime import datetime, timedelta
 
-# ==============================
-# CONFIG
-# ==============================
+API_KEY = "u2b7JQUNLzkgObMtQi8n1"
+BASE_URL = f"https://eth-mainnet.g.alchemy.com/nft/v2/{API_KEY}"
 
-ALCHEMY_URL = "https://eth-mainnet.g.alchemy.com/v2/u2b7JQUNLzkgObMtQi8n1"
-CONTRACT_ADDRESS = "0xb47e3cd837ddf8e4c57f05d70ab865de6e193bbb"
+CONTRACT = "0xb47e3cd837ddf8e4c57f05d70ab865de6e193bbb"
 
-w3 = Web3(Web3.HTTPProvider(ALCHEMY_URL))
-if not w3.isConnected():
-    print("❌ ERROR: Cannot connect to Ethereum RPC")
-    exit()
+# Calculate timestamp 1 year ago
+one_year_ago = int((datetime.utcnow() - timedelta(days=365)).timestamp())
 
-print("Ethereum RPC connected:", w3.clientVersion)
+url = f"{BASE_URL}/getNFTSales"
 
-contract_address = Web3.to_checksum_address(CONTRACT_ADDRESS)
+params = {
+    "contractAddress": CONTRACT,
+    "fromBlock": "0x0",
+    "toBlock": "latest"
+}
 
-# Topic hash for PunkTransfer event
-transfer_topic = w3.keccak(text="PunkTransfer(address,address,uint256)").hex()
+print("Fetching sales...")
 
-# ==============================
-# BLOCK RANGE
-# ==============================
+response = requests.get(url, params=params)
 
-# Punk genesis block ~ 3.918M
-start_block = 3918000
-end_block = w3.eth.block_number
-step = 5000  # blocks per batch
+data = response.json()
 
-all_transfers = []
+sales = []
 
-print(f"Fetching PunkTransfer events from block {start_block} to {end_block}...")
+for sale in data.get("nftSales", []):
+    if sale.get("blockTimestamp"):
+        sale_time = int(datetime.fromisoformat(
+            sale["blockTimestamp"].replace("Z", "")
+        ).timestamp())
 
-for from_block in tqdm(range(start_block, end_block + 1, step)):
-    to_block = min(from_block + step - 1, end_block)
-
-    try:
-        logs = w3.eth.get_logs({
-            "fromBlock": from_block,
-            "toBlock": to_block,
-            "address": contract_address,
-            "topics": [transfer_topic]
-        })
-
-        for log in logs:
-            from_addr = "0x" + log["topics"][1].hex()[-40:]
-            to_addr = "0x" + log["topics"][2].hex()[-40:]
-            token_id = int(log["topics"][3].hex(), 16)
-
-            tx_hash = log["transactionHash"].hex()
-            block_number = log["blockNumber"]
-            timestamp = w3.eth.get_block(block_number)["timestamp"]
-
-            all_transfers.append({
-                "token_id": token_id,
-                "from": from_addr,
-                "to": to_addr,
-                "block_number": block_number,
-                "timestamp": timestamp,
-                "transaction_hash": tx_hash
+        if sale_time >= one_year_ago:
+            sales.append({
+                "token_id": sale.get("tokenId"),
+                "buyer": sale.get("buyerAddress"),
+                "seller": sale.get("sellerAddress"),
+                "price": sale.get("sellerFee", {}).get("amount"),
+                "transaction_hash": sale.get("transactionHash"),
+                "timestamp": sale.get("blockTimestamp")
             })
 
-    except Exception as e:
-        print(f"⚠ Error retrieving blocks {from_block}→{to_block}: {e}")
-        time.sleep(2)
+df = pd.DataFrame(sales)
+df.to_csv("punk_last_year_sales.csv", index=False)
 
-print("Total transfers collected:", len(all_transfers))
-
-df = pd.DataFrame(all_transfers)
-df.sort_values(by=["block_number", "token_id"], inplace=True)
-df.to_csv("blockchain_punk_transfers.csv", index=False)
-
-print("✔ EXPORT COMPLETE: blockchain_punk_transfers.csv")
+print("Done")
+print("Total sales (last year):", len(df))
