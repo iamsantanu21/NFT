@@ -16,8 +16,5 @@ pipeline_run.log
 *.log
 TEMP_*.csv
 
-# Large generated data files
-collections/
-
 # Old checkpoint files
 *.checkpoint.json
