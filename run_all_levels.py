@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 # Level 3 script selection (fixed to full activity history)
-LEVEL3_SCRIPT = "Level3_activity_history.py"
+LEVEL3_SCRIPT = "Level3v4.py"
 
 
 def build_scripts() -> list[str]:
