@@ -8,8 +8,8 @@ __pycache__/
 *.pyc
 *.pyo
 
-# Pipeline config (contains API key — keep local only)
-pipeline_config.json
+# Pipeline config
+pipeline_config.local.json
 
 # Logs and temp files
 pipeline_run.log
