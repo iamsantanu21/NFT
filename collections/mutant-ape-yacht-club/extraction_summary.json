@@ -1,0 +1,15 @@
+{
+  "extraction_date": "2026-03-18T21:48:31.657074",
+  "total_activities": 0,
+  "unique_nfts_with_activity": 0,
+  "total_nfts_processed": 1,
+  "nfts_with_no_events": 0,
+  "extraction_time_minutes": 1.788251280784607,
+  "event_type_distribution": {},
+  "skipped_events": 2500,
+  "allowed_event_types": [
+    "mint",
+    "sale",
+    "transfer"
+  ]
+}
