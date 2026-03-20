@@ -19,11 +19,19 @@ COLLECTION_DIR.mkdir(parents=True, exist_ok=True)
 
 LEVEL1_FILE = COLLECTION_DIR / "Level1_collection_info.csv"
 LEVEL2_FILE = COLLECTION_DIR / "Level2_all_nfts_metadata.csv"
-ACTIVITY_FILE = COLLECTION_DIR / "Level3_complete_activity_history.csv"
 OUTPUT_FILE = COLLECTION_DIR / "Level4_financial_dataset.csv"
 
-if not ACTIVITY_FILE.exists():
-    raise RuntimeError(f"Level 3 activity file not found: {ACTIVITY_FILE}")
+# Accept multiple Level 3 output variants based on selected Level 3 mode.
+ACTIVITY_CANDIDATES = [
+    COLLECTION_DIR / "Level3_filtered_activity_history.csv",
+    COLLECTION_DIR / "Level3_complete_activity_history.csv",
+    COLLECTION_DIR / "Level3_core_activity.csv",
+]
+ACTIVITY_FILE = next((path for path in ACTIVITY_CANDIDATES if path.exists()), None)
+
+if ACTIVITY_FILE is None:
+    searched = ", ".join(str(p) for p in ACTIVITY_CANDIDATES)
+    raise RuntimeError(f"Level 3 activity file not found. Searched: {searched}")
 
 df = pd.read_csv(LEVEL2_FILE)
 token_ids = df["identifier"].astype(str).tolist()

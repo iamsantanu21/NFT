@@ -1,5 +1,6 @@
 {
   "collection": "doodles-official",
   "opensea_api_key": "5575c781fdb2424f8e5aa693c8f68a35",
-  "force_refresh": false
+  "etherscan_api_key": "VG6R28KIM4AUJDWU9RA4K8HHUG2VTC7MNY",
+  "force_refresh": true
 }

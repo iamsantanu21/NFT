@@ -21,6 +21,9 @@ API_KEY = os.getenv("OPENSEA_API_KEY")
 if not API_KEY:
     raise RuntimeError("OPENSEA_API_KEY environment variable not set. Please set it via pipeline_config.json or environment.")
 
+ETHERSCAN_API_KEY = str(os.getenv("ETHERSCAN_API_KEY", "")).strip()
+ETHERSCAN_BASE_URL = str(os.getenv("ETHERSCAN_BASE_URL", "https://api.etherscan.io/v2/api")).strip()
+
 BASE_URL = "https://api.opensea.io/api/v2"
 HEADERS = {
     "accept": "application/json",
@@ -59,6 +62,9 @@ COOLDOWN_AFTER_BATCH = 5
 MAX_PAGES = None
 FORCE_REFRESH = os.getenv("FORCE_REFRESH", "0") == "1"
 
+# Cache tx value lookups to avoid repeated external requests.
+TX_VALUE_CACHE: Dict[str, float | None] = {}
+
 # Filtering
 # Example: ACTIVITY_TYPES=sale,mint,transfer
 # ✏️ EDIT HERE — types to keep (comma-separated). Leave empty to keep all.
@@ -72,23 +78,29 @@ def parse_activity_types(value: str) -> Set[str]:
 
 FILTERED_TYPES = parse_activity_types(ACTIVITY_TYPES_RAW)
 
-# Maps user-specified type names → OpenSea API event_type values
-# "mint" is derived from transfer-from-0x0, so it maps to "transfer"
-_OPENSEA_API_TYPE_MAP = {
-    "sale": "sale",
-    "transfer": "transfer",
-    "mint": "transfer",   # mints are reclassified from transfer
-    "listing": "listing",
-    "offer": "order",
-    "cancel": "cancel",
-    "order": "order",
+# Maps user-specified type names -> OpenSea API event_type values.
+# Include native "mint" plus "transfer" fallback so mint prices from mint events are not missed.
+_OPENSEA_API_TYPE_MAP: dict[str, set[str]] = {
+    "sale": {"sale"},
+    "transfer": {"transfer"},
+    "mint": {"mint", "transfer"},
+    "listing": {"listing"},
+    "offer": {"order"},
+    "cancel": {"cancel"},
+    "order": {"order"},
 }
 
 def _get_api_types_to_fetch() -> Set[str]:
     """Returns OpenSea API event_type values needed to satisfy FILTERED_TYPES."""
     if not FILTERED_TYPES:
         return set()  # empty = fetch all
-    return {_OPENSEA_API_TYPE_MAP[t] for t in FILTERED_TYPES if t in _OPENSEA_API_TYPE_MAP}
+
+    api_types: Set[str] = set()
+    for requested_type in FILTERED_TYPES:
+        mapped_types = _OPENSEA_API_TYPE_MAP.get(requested_type)
+        if mapped_types:
+            api_types.update(mapped_types)
+    return api_types
 
 API_TYPES_TO_FETCH = _get_api_types_to_fetch()
 
@@ -188,6 +200,56 @@ def format_event_timestamp(value) -> str:
         return raw
 
 
+def get_transaction_value_eth(tx_hash: str) -> float | None:
+    """Fetch transaction value in ETH from Etherscan API v2."""
+    if not tx_hash:
+        return None
+
+    if tx_hash in TX_VALUE_CACHE:
+        return TX_VALUE_CACHE[tx_hash]
+
+    if not ETHERSCAN_API_KEY:
+        TX_VALUE_CACHE[tx_hash] = None
+        return None
+
+    try:
+        response = requests.get(
+            ETHERSCAN_BASE_URL,
+            params={
+                "module": "transaction",
+                "action": "gettxreceiptstatus",
+                "txhash": tx_hash,
+                "apikey": ETHERSCAN_API_KEY,
+            },
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        result = payload.get("result")
+
+        if not isinstance(result, dict):
+            TX_VALUE_CACHE[tx_hash] = None
+            return None
+
+        value_str = result.get("value")
+        if not value_str:
+            TX_VALUE_CACHE[tx_hash] = None
+            return None
+
+        try:
+            value_wei = int(value_str)
+            value_eth = value_wei / (10 ** 18)
+            TX_VALUE_CACHE[tx_hash] = value_eth
+            return value_eth
+        except (ValueError, TypeError):
+            TX_VALUE_CACHE[tx_hash] = None
+            return None
+
+    except Exception:
+        TX_VALUE_CACHE[tx_hash] = None
+        return None
+
+
 def _fetch_events_for_type(token_id: str, event_type: str | None, max_retries: int = 3) -> List[Dict]:
     """Fetch all pages of events for a single event_type (or all types if event_type is None)."""
     all_events: List[Dict] = []
@@ -254,14 +316,32 @@ def get_nft_events(token_id: str, max_retries: int = 3) -> List[Dict]:
         # No filter — fetch everything
         return _fetch_events_for_type(token_id, None, max_retries)
 
-    seen_txns: Set[str] = set()
+    seen_events: Set[tuple[str, str, str, str, str, str, str, str]] = set()
     combined: List[Dict] = []
-    for api_type in API_TYPES_TO_FETCH:
+    for api_type in sorted(API_TYPES_TO_FETCH):
         for event in _fetch_events_for_type(token_id, api_type, max_retries):
-            # Deduplicate by transaction hash; fall back to object id
-            key = str(event.get("transaction") or id(event))
-            if key not in seen_txns:
-                seen_txns.add(key)
+            # Different activity types can share one transaction hash.
+            # Include event identity fields so sale + transfer are both retained.
+            payment = event.get("payment") or {}
+            tx = event.get("transaction")
+            if isinstance(tx, dict):
+                tx_hash = str(tx.get("transaction_hash") or tx.get("hash") or tx.get("id") or "")
+            else:
+                tx_hash = str(tx or "")
+
+            key = (
+                tx_hash,
+                str(event.get("event_timestamp") or ""),
+                str(event.get("event_type") or ""),
+                str(event.get("order_type") or ""),
+                str(event.get("from_address") or ""),
+                str(event.get("to_address") or ""),
+                str(payment.get("quantity") or ""),
+                str(payment.get("decimals") or ""),
+            )
+
+            if key not in seen_events:
+                seen_events.add(key)
                 combined.append(event)
     return combined
 
@@ -282,12 +362,46 @@ def parse_event_to_activity(event: Dict, identifier: str) -> Dict:
         except (ValueError, TypeError):
             price_eth = 0.0
 
+    # Some payloads include sale value outside payment.
+    if price_eth == 0.0:
+        for key in ("sale_price", "total_price", "price"):
+            raw_price = event.get(key)
+            if raw_price is None:
+                continue
+            try:
+                price_eth = float(raw_price)
+                break
+            except (ValueError, TypeError):
+                continue
+
+    transaction = event.get("transaction")
+    tx_hash = ""
+    if isinstance(transaction, dict):
+        tx_hash = str(
+            transaction.get("transaction_hash")
+            or transaction.get("hash")
+            or transaction.get("id")
+            or ""
+        )
+    elif transaction is not None:
+        tx_hash = str(transaction)
+
     from_address = event.get("from_address") or "0x0"
     to_address = event.get("to_address") or "0x0"
 
     normalized_from = str(from_address).strip().lower()
     if event_type == "transfer" and normalized_from in {"0x0", "0x0000000000000000000000000000000000000000"}:
         event_type = "mint"
+    elif event_type == "transfer" and price_eth > 0:
+        # Treat value-carrying transfer events as sales.
+        event_type = "sale"
+
+    # Mint events often arrive as transfer-from-zero with no OpenSea payment object.
+    # If available, use tx value as a mint price proxy.
+    if event_type == "mint" and price_eth == 0.0 and tx_hash:
+        tx_value_eth = get_transaction_value_eth(tx_hash)
+        if tx_value_eth is not None and tx_value_eth > 0:
+            price_eth = tx_value_eth
 
     return {
         "identifier": str(identifier),
@@ -299,7 +413,7 @@ def parse_event_to_activity(event: Dict, identifier: str) -> Dict:
         "from": from_address,
         "to": to_address,
         "timestamp": format_event_timestamp(event.get("event_timestamp")),
-        "tx_hash": str(event.get("transaction", "")),
+        "tx_hash": tx_hash,
     }
 
 
@@ -325,6 +439,10 @@ def main():
         print(f"Post-fetch filter: keeping {', '.join(sorted(FILTERED_TYPES))}")
     else:
         print("Filtering disabled. Fetching all event types.")
+
+    if "mint" in FILTERED_TYPES and not ETHERSCAN_API_KEY:
+        print("Note: ETHERSCAN_API_KEY not set. Mint rows may keep price_eth=0 when OpenSea omits payment data.")
+
     print("=" * 80 + "\n")
 
     identifiers, input_file = load_identifiers()

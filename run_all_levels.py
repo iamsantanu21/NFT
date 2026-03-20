@@ -90,6 +90,10 @@ def main() -> int:
     if config_api_key and not env.get("OPENSEA_API_KEY"):
         env["OPENSEA_API_KEY"] = config_api_key
 
+    config_etherscan_key = str(cfg.get("etherscan_api_key", "")).strip()
+    if config_etherscan_key and not env.get("ETHERSCAN_API_KEY"):
+        env["ETHERSCAN_API_KEY"] = config_etherscan_key
+
     scripts = build_scripts()
 
     print(f"Collection : {env['COLLECTION_SLUG']}")
