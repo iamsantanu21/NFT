@@ -1,0 +1,15 @@
+{
+  "extraction_date": "2026-03-22T17:59:05.600524",
+  "filtered_event_types": [
+    "mint",
+    "sale",
+    "transfer"
+  ],
+  "total_activities": 78633,
+  "unique_nfts_with_activity": 2254,
+  "event_type_distribution": {
+    "transfer": 64656,
+    "sale": 11723,
+    "mint": 2254
+  }
+}
